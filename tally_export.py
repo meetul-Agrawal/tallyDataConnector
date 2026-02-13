@@ -47,15 +47,46 @@ class TallyODBCConnector:
         """
         Fetch all available companies from Tally.
         Works regardless of whether company is on local/network drive.
+        Tally stores company names independently of their data path location.
+        Returns list of tuples: (company_name, data_path)
         """
         companies = []
         try:
-            # Query to get all company names from Tally
-            self.cursor.execute("SELECT $Name FROM Company")
-            rows = self.cursor.fetchall()
-            for row in rows:
-                if row[0]:
-                    companies.append(row[0])
+            # Query to get company names and paths from Tally
+            # This works for companies stored locally, on network drives,
+            # external drives, or any accessible location
+            try:
+                self.cursor.execute("SELECT $Name, $DataPath FROM Company")
+                rows = self.cursor.fetchall()
+                for row in rows:
+                    if row[0]:
+                        company_name = str(row[0]).strip()
+                        data_path = str(row[1]).strip() if row[1] else "N/A"
+                        if company_name:
+                            companies.append((company_name, data_path))
+            except pyodbc.Error:
+                # Fallback to just getting names if DataPath is not available
+                self.cursor.execute("SELECT $Name FROM Company")
+                rows = self.cursor.fetchall()
+                for row in rows:
+                    if row[0]:
+                        company_name = str(row[0]).strip()
+                        if company_name:
+                            companies.append((company_name, "N/A"))
+
+            # Also try alternate query if first one returns empty
+            if not companies:
+                try:
+                    self.cursor.execute("SELECT $Name FROM CompanyCollection")
+                    rows = self.cursor.fetchall()
+                    for row in rows:
+                        if row[0]:
+                            company_name = str(row[0]).strip()
+                            if company_name:
+                                companies.append((company_name, "N/A"))
+                except pyodbc.Error:
+                    pass
+
         except pyodbc.Error as e:
             print(f"Error fetching companies: {e}")
         return companies
@@ -247,13 +278,17 @@ class TallyODBCConnector:
 
 
 def display_company_menu(companies):
-    """Display company selection menu."""
-    print("\n" + "=" * 50)
+    """Display company selection menu with location info."""
+    print("\n" + "=" * 60)
     print("AVAILABLE COMPANIES")
-    print("=" * 50)
-    for idx, company in enumerate(companies, 1):
-        print(f"  [{idx}] {company}")
-    print("=" * 50)
+    print("=" * 60)
+    for idx, (company_name, data_path) in enumerate(companies, 1):
+        print(f"  [{idx}] {company_name}")
+        if data_path and data_path != "N/A":
+            # Show truncated path if too long
+            display_path = data_path if len(data_path) <= 45 else "..." + data_path[-42:]
+            print(f"      Location: {display_path}")
+    print("=" * 60)
 
 
 def main():
@@ -290,18 +325,20 @@ def main():
                 choice = input(f"\nSelect company (1-{len(companies)}): ").strip()
                 choice_num = int(choice)
                 if 1 <= choice_num <= len(companies):
-                    selected_company = companies[choice_num - 1]
+                    selected_company_name, selected_company_path = companies[choice_num - 1]
                     break
                 else:
                     print(f"Please enter a number between 1 and {len(companies)}")
             except ValueError:
                 print("Please enter a valid number")
 
-        print(f"\n→ Selected: {selected_company}")
+        print(f"\n→ Selected Company: {selected_company_name}")
+        if selected_company_path and selected_company_path != "N/A":
+            print(f"→ Data Location: {selected_company_path}")
         print("→ Exporting data, please wait...")
 
         # Export data
-        output_path = connector.export_company_data(selected_company)
+        output_path = connector.export_company_data(selected_company_name)
 
         print("\n" + "=" * 50)
         print("EXPORT COMPLETE!")

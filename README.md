@@ -4,7 +4,8 @@ A Python script that exports all Tally accounting data in XML format using ODBC 
 
 ## Features
 
-- Lists all available Tally companies (works with local and network drive locations)
+- Lists all available Tally companies with their data location paths
+- Shows company location whether stored locally, on network drives, external drives, or any accessible path
 - Interactive company selection menu
 - Exports comprehensive data including:
   - Masters (Ledgers, Groups, Cost Centers, Stock Items, Units, Currencies, Voucher Types)
@@ -59,6 +60,8 @@ Exported XML files are saved in the `tally_exports/` folder with the naming form
 ### No Companies Found
 - Make sure at least one company is loaded in Tally
 - Check that the company data path is accessible
+- For network drive locations, ensure the network path is accessible from this machine
+- Verify that Tally has the company loaded (check F1 > Select Company)
 
 ### ODBC Driver Not Found
 - Install Tally ODBC Driver from your Tally installation
