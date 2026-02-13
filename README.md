@@ -10,9 +10,8 @@ A Python script that exports all Tally accounting data in XML format using ODBC 
 - Exports comprehensive data including:
   - Masters (Ledgers, Groups, Cost Centers, Stock Items, Units, Currencies, Voucher Types)
   - Vouchers (Transactions with ledger entries)
-  - Stock data (Stock items and inventory entries)
-  - Balance sheet data (Ledger balances)
-- Saves data as XML with timestamp in filename
+- Saves data as separate XML files organized in timestamped folders
+- Creates export summary with record counts
 - Works regardless of where the Tally company data is stored (local or network drive)
 
 ## Prerequisites
@@ -41,14 +40,28 @@ python tally_export.py
 1. Ensure Tally is running with ODBC enabled on port 9000
 2. Run the script
 3. Select the company from the displayed list
-4. Data will be exported to `tally_exports/` folder as XML
+4. Data will be exported to `tally_exports/` folder
 
-## Output
+## Output Structure
 
-Exported XML files are saved in the `tally_exports/` folder with the naming format:
+Exported files are organized in the `tally_exports/` folder with the following structure:
+
 ```
-<CompanyName>_YYYYMMDD_HHMMSS.xml
+tally_exports/
+└── CompanyName_YYYYMMDD_HHMMSS/
+    ├── Ledgers.xml
+    ├── Groups.xml
+    ├── VoucherTypes.xml
+    ├── CostCenters.xml
+    ├── StockGroups.xml
+    ├── StockItems.xml
+    ├── Units.xml
+    ├── Currencies.xml
+    ├── Vouchers.xml
+    └── export_summary.txt
 ```
+
+Each XML file contains only its respective data type, making it easier to work with specific data. The `export_summary.txt` file contains information about the export including record counts for each file.
 
 ## Troubleshooting
 

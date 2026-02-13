@@ -2,6 +2,7 @@
 """
 Tally Data Export Connector
 Exports all Tally data in XML format using ODBC on port 9000.
+Creates separate XML files for each data type.
 """
 
 import pyodbc
@@ -93,11 +94,14 @@ class TallyODBCConnector:
 
     def export_company_data(self, company_name, output_folder="tally_exports"):
         """
-        Export all data from the selected company to XML.
+        Export all data from the selected company to separate XML files.
         
         Args:
             company_name: Name of the company to export
-            output_folder: Folder where XML files will be saved
+            output_folder: Base folder where export folders will be created
+            
+        Returns:
+            tuple: (export_folder_path, summary_dict)
         """
         # Create output folder if it doesn't exist
         if not os.path.exists(output_folder):
@@ -106,74 +110,259 @@ class TallyODBCConnector:
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_company_name = "".join(c for c in company_name if c.isalnum() or c in (' ', '-', '_')).strip()
-        filename = f"{safe_company_name}_{timestamp}.xml"
-        filepath = os.path.join(output_folder, filename)
+        export_folder = os.path.join(output_folder, f"{safe_company_name}_{timestamp}")
+        
+        # Create company-specific export folder
+        os.makedirs(export_folder)
+        print(f"✓ Created export folder: {export_folder}")
 
-        # Create XML structure
-        root = ET.Element("TALLYEXPORT")
+        # Summary dictionary to track export statistics
+        summary = {
+            "company_name": company_name,
+            "export_time": datetime.now().isoformat(),
+            "export_folder": export_folder,
+            "files": {}
+        }
+
+        # Export each master type to separate XML file
+        files_to_export = [
+            ("Ledgers.xml", self._export_ledgers),
+            ("Groups.xml", self._export_groups),
+            ("VoucherTypes.xml", self._export_voucher_types),
+            ("CostCenters.xml", self._export_cost_centers),
+            ("StockGroups.xml", self._export_stock_groups),
+            ("StockItems.xml", self._export_stock_items),
+            ("Units.xml", self._export_units),
+            ("Currencies.xml", self._export_currencies),
+            ("Vouchers.xml", self._export_vouchers),
+        ]
+
+        for filename, export_func in files_to_export:
+            filepath = os.path.join(export_folder, filename)
+            count = export_func(filepath)
+            summary["files"][filename] = count
+            if count > 0:
+                print(f"✓ Exported {count} records to {filename}")
+
+        # Create export summary file
+        summary_path = os.path.join(export_folder, "export_summary.txt")
+        self._create_summary_file(summary_path, summary)
+        summary["files"]["export_summary.txt"] = "N/A"
+        print(f"✓ Created export_summary.txt")
+
+        return export_folder, summary
+
+    def _create_xml_root(self, entity_type, company_name):
+        """Create a standard XML root element."""
+        root = ET.Element(entity_type.upper())
         root.set("version", "1.0")
         root.set("generated", datetime.now().isoformat())
         root.set("company", company_name)
+        return root
 
-        company_elem = ET.SubElement(root, "COMPANY")
-        company_elem.set("name", company_name)
-
-        # Export Masters (Ledgers, Groups, Stock Items, etc.)
-        masters_elem = ET.SubElement(company_elem, "MASTERS")
-        self._export_masters(masters_elem)
-
-        # Export Vouchers (Transactions)
-        vouchers_elem = ET.SubElement(company_elem, "VOUCHERS")
-        self._export_vouchers(vouchers_elem)
-
-        # Export Stock Data
-        stock_elem = ET.SubElement(company_elem, "STOCK")
-        self._export_stock(stock_elem)
-
-        # Export Balance Sheet Data
-        balances_elem = ET.SubElement(company_elem, "BALANCES")
-        self._export_balances(balances_elem)
-
-        # Write to file
+    def _write_xml_file(self, root, filepath):
+        """Write XML to file with proper formatting."""
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ")
         tree.write(filepath, encoding="utf-8", xml_declaration=True)
-
-        print(f"✓ Data exported to: {filepath}")
         return filepath
 
-    def _export_masters(self, parent_elem):
-        """Export master data (Ledgers, Groups, Cost Centers, etc.)."""
-        masters_data = {
-            "LEDGERS": "SELECT $Name, $Parent, $OpeningBalance FROM Ledger",
-            "GROUPS": "SELECT $Name, $Parent FROM Groups",
-            "COST_CENTERS": "SELECT $Name, $Parent FROM CostCenter",
-            "STOCK_GROUPS": "SELECT $Name, $Parent FROM StockGroup",
-            "STOCK_ITEMS": "SELECT $Name, $Parent, $BaseUnits FROM StockItem",
-            "UNITS": "SELECT $Name, $BaseUnits FROM Unit",
-            "CURRENCIES": "SELECT $Name, $Symbol FROM Currency",
-            "VOUCHER_TYPES": "SELECT $Name, $Parent FROM VoucherType",
-        }
+    def _export_ledgers(self, filepath):
+        """Export ledgers to separate XML file."""
+        root = self._create_xml_root("LEDGERS", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Parent, $OpeningBalance, $IsBillWiseOn
+                FROM Ledger
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                ledger_elem = ET.SubElement(root, "LEDGER")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(ledger_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
 
-        for master_name, query in masters_data.items():
-            try:
-                self.cursor.execute(query)
-                rows = self.cursor.fetchall()
-                if rows:
-                    master_elem = ET.SubElement(parent_elem, master_name)
-                    columns = [desc[0] for desc in self.cursor.description]
-                    for row in rows:
-                        item_elem = ET.SubElement(master_elem, "ITEM")
-                        for col_name, value in zip(columns, row):
-                            if value is not None:
-                                field_elem = ET.SubElement(item_elem, col_name.replace("$", ""))
-                                field_elem.text = str(value)
-            except pyodbc.Error:
-                # Some masters might not exist in all Tally versions
-                pass
+    def _export_groups(self, filepath):
+        """Export groups to separate XML file."""
+        root = self._create_xml_root("GROUPS", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Parent, $NatureOfGroup
+                FROM Groups
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                group_elem = ET.SubElement(root, "GROUP")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(group_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
 
-    def _export_vouchers(self, parent_elem):
-        """Export voucher/transaction data."""
+    def _export_voucher_types(self, filepath):
+        """Export voucher types to separate XML file."""
+        root = self._create_xml_root("VOUCHER_TYPES", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Parent, $Abbreviation, $NumberingMethod
+                FROM VoucherType
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                vtype_elem = ET.SubElement(root, "VOUCHER_TYPE")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(vtype_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
+
+    def _export_cost_centers(self, filepath):
+        """Export cost centers to separate XML file."""
+        root = self._create_xml_root("COST_CENTERS", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Parent, $IsRevenue
+                FROM CostCenter
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                cc_elem = ET.SubElement(root, "COST_CENTER")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(cc_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
+
+    def _export_stock_groups(self, filepath):
+        """Export stock groups to separate XML file."""
+        root = self._create_xml_root("STOCK_GROUPS", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Parent
+                FROM StockGroup
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                sg_elem = ET.SubElement(root, "STOCK_GROUP")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(sg_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
+
+    def _export_stock_items(self, filepath):
+        """Export stock items to separate XML file."""
+        root = self._create_xml_root("STOCK_ITEMS", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Parent, $BaseUnits, $OpeningBalance, 
+                       $ClosingBalance, $StandardCost, $StandardPrice
+                FROM StockItem
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                item_elem = ET.SubElement(root, "STOCK_ITEM")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(item_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
+
+    def _export_units(self, filepath):
+        """Export units to separate XML file."""
+        root = self._create_xml_root("UNITS", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $BaseUnits, $Symbol
+                FROM Unit
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                unit_elem = ET.SubElement(root, "UNIT")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(unit_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
+
+    def _export_currencies(self, filepath):
+        """Export currencies to separate XML file."""
+        root = self._create_xml_root("CURRENCIES", "N/A")
+        try:
+            self.cursor.execute("""
+                SELECT $Name, $Symbol, $IsBaseCurrency
+                FROM Currency
+            """)
+            rows = self.cursor.fetchall()
+            columns = [desc[0] for desc in self.cursor.description]
+            
+            for row in rows:
+                curr_elem = ET.SubElement(root, "CURRENCY")
+                for col_name, value in zip(columns, row):
+                    if value is not None:
+                        field_elem = ET.SubElement(curr_elem, col_name.replace("$", ""))
+                        field_elem.text = str(value)
+            
+            self._write_xml_file(root, filepath)
+            return len(rows)
+        except pyodbc.Error:
+            self._write_xml_file(root, filepath)
+            return 0
+
+    def _export_vouchers(self, filepath):
+        """Export vouchers to separate XML file."""
+        root = self._create_xml_root("VOUCHERS", "N/A")
         try:
             self.cursor.execute("""
                 SELECT 
@@ -183,98 +372,72 @@ class TallyODBCConnector:
             """)
             rows = self.cursor.fetchall()
             columns = [desc[0] for desc in self.cursor.description]
-
+            
             for row in rows:
-                voucher_elem = ET.SubElement(parent_elem, "VOUCHER")
+                voucher_elem = ET.SubElement(root, "VOUCHER")
                 for col_name, value in zip(columns, row):
                     if value is not None:
                         field_elem = ET.SubElement(voucher_elem, col_name.replace("$", ""))
                         field_elem.text = str(value)
 
-                # Get voucher ledger entries
+                # Try to get voucher ledger entries
                 try:
-                    date_val = row[0]
-                    vtype = row[1]
-                    vnum = row[2]
-                    self.cursor.execute(f"""
-                        SELECT $LedgerName, $Amount, $IsDeemedPositive 
-                        FROM AccountingAllocations 
-                        WHERE $VoucherDate = '{date_val}' 
-                        AND $VoucherTypeName = '{vtype}' 
-                        AND $VoucherNumber = '{vnum}'
-                    """)
-                    entries = self.cursor.fetchall()
-                    entries_elem = ET.SubElement(voucher_elem, "ENTRIES")
-                    for entry in entries:
-                        entry_elem = ET.SubElement(entries_elem, "ENTRY")
-                        ledger_elem = ET.SubElement(entry_elem, "LEDGER")
-                        ledger_elem.text = str(entry[0])
-                        amount_elem = ET.SubElement(entry_elem, "AMOUNT")
-                        amount_elem.text = str(entry[1])
+                    date_val = str(row[0])
+                    vtype = str(row[1]) if row[1] else ""
+                    vnum = str(row[2]) if row[2] else ""
+                    
+                    if vtype and vnum:
+                        self.cursor.execute(f"""
+                            SELECT $LedgerName, $Amount, $IsDeemedPositive 
+                            FROM AccountingAllocations 
+                            WHERE $VoucherDate = '{date_val}' 
+                            AND $VoucherTypeName = '{vtype}' 
+                            AND $VoucherNumber = '{vnum}'
+                        """)
+                        entries = self.cursor.fetchall()
+                        entries_elem = ET.SubElement(voucher_elem, "ENTRIES")
+                        for entry in entries:
+                            entry_elem = ET.SubElement(entries_elem, "ENTRY")
+                            ledger_elem = ET.SubElement(entry_elem, "LEDGER")
+                            ledger_elem.text = str(entry[0])
+                            amount_elem = ET.SubElement(entry_elem, "AMOUNT")
+                            amount_elem.text = str(entry[1])
                 except pyodbc.Error:
                     pass
 
-        except pyodbc.Error as e:
-            print(f"Warning: Could not export vouchers: {e}")
-
-    def _export_stock(self, parent_elem):
-        """Export stock-related data."""
-        try:
-            self.cursor.execute("""
-                SELECT $Name, $BaseUnits, $ClosingBalance, $OpeningBalance,
-                       $StockGroup, $StandardCost, $StandardPrice
-                FROM StockItem
-            """)
-            rows = self.cursor.fetchall()
-            columns = [desc[0] for desc in self.cursor.description]
-
-            for row in rows:
-                item_elem = ET.SubElement(parent_elem, "STOCK_ITEM")
-                for col_name, value in zip(columns, row):
-                    if value is not None:
-                        field_elem = ET.SubElement(item_elem, col_name.replace("$", ""))
-                        field_elem.text = str(value)
+            self._write_xml_file(root, filepath)
+            return len(rows)
         except pyodbc.Error:
-            pass
+            self._write_xml_file(root, filepath)
+            return 0
 
-        # Stock voucher entries
-        try:
-            self.cursor.execute("""
-                SELECT $StockItemName, $Rate, $Amount, $BilledQty, $ActualQty
-                FROM InventoryEntries
-            """)
-            rows = self.cursor.fetchall()
-            entries_elem = ET.SubElement(parent_elem, "INVENTORY_ENTRIES")
-            columns = [desc[0] for desc in self.cursor.description]
-
-            for row in rows:
-                entry_elem = ET.SubElement(entries_elem, "ENTRY")
-                for col_name, value in zip(columns, row):
-                    if value is not None:
-                        field_elem = ET.SubElement(entry_elem, col_name.replace("$", ""))
-                        field_elem.text = str(value)
-        except pyodbc.Error:
-            pass
-
-    def _export_balances(self, parent_elem):
-        """Export balance sheet related data."""
-        try:
-            # Get ledger balances
-            self.cursor.execute("""
-                SELECT $Name, $ClosingBalance, $OpeningBalance
-                FROM Ledger
-            """)
-            rows = self.cursor.fetchall()
-            columns = [desc[0] for desc in self.cursor.description]
-
-            for row in rows:
-                balance_elem = ET.SubElement(parent_elem, "LEDGER_BALANCE")
-                for col_name, value in zip(columns, row):
-                    if value is not None:
-                        field_elem = ET.SubElement(balance_elem, col_name.replace("$", ""))
-                        field_elem.text = str(value)
-        except pyodbc.Error:
-            pass
+    def _create_summary_file(self, filepath, summary):
+        """Create export summary text file."""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write("=" * 60 + "\n")
+            f.write("TALLY DATA EXPORT SUMMARY\n")
+            f.write("=" * 60 + "\n\n")
+            
+            f.write(f"Company Name: {summary['company_name']}\n")
+            f.write(f"Export Time: {summary['export_time']}\n")
+            f.write(f"Export Folder: {summary['export_folder']}\n\n")
+            
+            f.write("=" * 60 + "\n")
+            f.write("EXPORTED FILES\n")
+            f.write("=" * 60 + "\n\n")
+            
+            total_records = 0
+            for filename, count in summary['files'].items():
+                if filename != "export_summary.txt":
+                    f.write(f"• {filename:<25} : {count} records\n")
+                    if isinstance(count, int):
+                        total_records += count
+                else:
+                    f.write(f"• {filename:<25} : Summary file\n")
+            
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"TOTAL RECORDS: {total_records}\n")
+            f.write("=" * 60 + "\n")
 
 
 def display_company_menu(companies):
@@ -338,12 +501,18 @@ def main():
         print("→ Exporting data, please wait...")
 
         # Export data
-        output_path = connector.export_company_data(selected_company_name)
+        export_folder, summary = connector.export_company_data(selected_company_name)
 
         print("\n" + "=" * 50)
         print("EXPORT COMPLETE!")
         print("=" * 50)
-        print(f"File: {output_path}")
+        print(f"Export Folder: {export_folder}")
+        print(f"\nFiles created:")
+        for filename, count in summary['files'].items():
+            if filename != "export_summary.txt":
+                print(f"  • {filename} ({count} records)")
+            else:
+                print(f"  • {filename}")
         print("=" * 50)
 
     except KeyboardInterrupt:
